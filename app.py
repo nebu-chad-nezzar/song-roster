@@ -9,7 +9,7 @@ st.set_page_config(page_title="Weekly Song Roster", layout="wide")
 
 
 # -----------------------------
-# HARD-CODED HYMN RULES
+# HARD-CODED HYMN CAP ONLY
 # -----------------------------
 HYMN_STYLE_NAME = "Hymn"
 MAX_HYMNS_PER_WEEK = 1
@@ -63,16 +63,13 @@ def max_uses_per_song(total_weeks: int, min_repeat_gap: int) -> int:
 
 def build_song_key(df: pd.DataFrame) -> pd.Series:
     """
-    Build a unique key per song row. This is the internal unique identifier used for:
-    - cooldown
-    - no-duplicates-in-week
-    - output lookup
+    Unique key per song row used for cooldown + selection uniqueness:
+      SongKey = "Title — Artist"
     """
-    title = df["Title"].astype(str).str.strip()
-    artist = df["Artist"].astype(str).str.strip()
-    # Avoid "nan" strings showing up
-    title = title.replace("nan", "").fillna("")
-    artist = artist.replace("nan", "").fillna("")
+    title = df["Title"].astype(str).str.strip().fillna("")
+    artist = df["Artist"].astype(str).str.strip().fillna("")
+    title = title.replace("nan", "")
+    artist = artist.replace("nan", "")
     return (title + " — " + artist).str.strip(" —")
 
 
@@ -117,8 +114,8 @@ def feasibility_checks(df: pd.DataFrame, cfg: Config):
     - global upper bound capacity (rough)
     - must-include count <= songs per week
     - must-include and must-exclude conflict
-    - hymn must-include sanity
-    - inform about RotationScore=0 (disabled songs)
+    - info about RotationScore=0 disabled songs
+    - info about hymn rows (cap is enforced later)
     """
     unique_song_keys = df["SongKey"].nunique()
     demand = cfg.total_weeks * cfg.songs_per_week
@@ -161,17 +158,13 @@ def feasibility_checks(df: pd.DataFrame, cfg: Config):
             f"Conflicting rules: these styles are both must-include and must-exclude: {sorted(conflicts)}"
         )
 
-    hymn_rows = int((df["Style"].map(is_hymn)).sum())
-    if hymn_rows == 0 and any(is_style(s, HYMN_STYLE_NAME) for s in cfg.must_include_styles):
-        if severity != "error":
-            severity = "warning"
-        messages.append(
-            f"'{HYMN_STYLE_NAME}' is marked must-include, but there are 0 rows with Style='{HYMN_STYLE_NAME}'."
-        )
-
     rot0 = int((df["RotationScore"] == 0).sum())
     if rot0 > 0:
         messages.append(f"Info: {rot0} songs have RotationScore=0 (they will never be selected).")
+
+    hymn_rows = int((df["Style"].map(is_hymn)).sum())
+    if is_style(HYMN_STYLE_NAME, HYMN_STYLE_NAME) and hymn_rows == 0:
+        messages.append(f"Info: No rows found with Style='{HYMN_STYLE_NAME}' (hymn cap still applies, but won't matter).")
 
     stats = {
         "unique_songs": int(unique_song_keys),
@@ -190,6 +183,13 @@ def feasibility_checks(df: pd.DataFrame, cfg: Config):
 def generate_roster(df: pd.DataFrame, cfg: Config) -> list[list[str]]:
     """
     Returns roster as list of weeks; each week is list of SongKey.
+    Rules:
+    - No duplicate SongKey within a week
+    - Global min repeat gap across weeks (cooldown)
+    - Must include >=1 song per required Style each week (when possible)
+    - Must exclude Styles always
+    - Hard rule: max 1 hymn per week (Style == "Hymn")
+    - RotationScore biases selection probabilities; RotationScore=0 => never selected
     """
     rng = np.random.default_rng(cfg.seed)
 
@@ -247,44 +247,32 @@ def generate_roster(df: pd.DataFrame, cfg: Config) -> list[list[str]]:
 
         # 1) Must-include styles first (one per required style)
         required_styles = list(cfg.must_include_styles)
+        # Do hymn first so the cap is enforced early if Hymn is must-include
         required_styles.sort(key=lambda s: 0 if is_style(s, HYMN_STYLE_NAME) else 1)
 
         for style_name in required_styles:
             if len(week_keys) >= cfg.songs_per_week:
                 break
 
+            # Must-exclude wins (also handled in feasibility check, but keep defensive)
             if any(is_style(style_name, x) for x in cfg.must_exclude_styles):
                 continue
 
+            # If hymn cap reached, can't satisfy a Hymn must-include this week
             if is_style(style_name, HYMN_STYLE_NAME) and hymns_this_week >= MAX_HYMNS_PER_WEEK:
                 continue
 
-            strict_mask = base_eligible(df)
-            strict_mask = eligible_with_hymn_cap(df, strict_mask)
-            strict_style = strict_mask & df["Style"].map(lambda s: is_style(s, style_name))
-            eligible_strict = df[strict_style].copy()
+            mask = base_eligible(df)
+            mask = eligible_with_hymn_cap(df, mask)
+            mask = mask & df["Style"].map(lambda s: is_style(s, style_name))
+            eligible = df[mask].copy()
 
-            if not eligible_strict.empty:
-                picked = weighted_pick_one(rng, eligible_strict, cfg)
-                if picked is not None:
-                    pick_and_commit(picked)
+            if eligible.empty:
                 continue
 
-            # Behaviour C: if HYMN required but blocked by cooldown, relax cooldown for hymns only
-            if is_style(style_name, HYMN_STYLE_NAME):
-                relaxed_mask = (
-                    not_excluded(df)
-                    & not_rotation_zero(df)
-                    & (~df["SongKey"].isin(used_this_week))  # ignore cooldown
-                )
-                relaxed_mask = eligible_with_hymn_cap(df, relaxed_mask)
-                relaxed_style = relaxed_mask & df["Style"].map(is_hymn)
-                eligible_relaxed = df[relaxed_style].copy()
-
-                if not eligible_relaxed.empty:
-                    picked = weighted_pick_one(rng, eligible_relaxed, cfg)
-                    if picked is not None:
-                        pick_and_commit(picked)
+            picked = weighted_pick_one(rng, eligible, cfg)
+            if picked is not None:
+                pick_and_commit(picked)
 
         # 2) Fill remaining slots
         while len(week_keys) < cfg.songs_per_week:
@@ -297,6 +285,7 @@ def generate_roster(df: pd.DataFrame, cfg: Config) -> list[list[str]]:
             picked = weighted_pick_one(rng, eligible, cfg)
             if picked is None:
                 break
+
             pick_and_commit(picked)
 
         roster.append(week_keys)
@@ -305,11 +294,7 @@ def generate_roster(df: pd.DataFrame, cfg: Config) -> list[list[str]]:
 
 
 def roster_to_text(roster: list[list[str]], df: pd.DataFrame) -> str:
-    """
-    Output includes Title + Artist.
-    Roster contains SongKey, so we can always print it reliably.
-    """
-    # Map SongKey -> display string (Title — Artist)
+    """Output includes Title + Artist via SongKey."""
     songkey_to_display = dict(zip(df["SongKey"], df["SongKey"]))
 
     lines = []
@@ -337,7 +322,7 @@ if missing:
     st.error(f"Missing required columns: {missing}")
     st.stop()
 
-# Clean and add SongKey early (so previews/diagnostics match)
+# Clean and add SongKey early
 df = df.copy()
 df["Title"] = df["Title"].astype(str).str.strip()
 df["Artist"] = df["Artist"].astype(str).str.strip()
@@ -346,7 +331,7 @@ df["Feel"] = df["Feel"].astype(str).str.strip()
 df["RotationScore"] = pd.to_numeric(df["RotationScore"], errors="coerce").fillna(0).clip(lower=0)
 df["SongKey"] = build_song_key(df)
 
-# Ensure SongKey isn't blank (optional defensive clean-up)
+# Drop blank keys (defensive)
 df = df[df["SongKey"].astype(str).str.strip() != ""].copy()
 
 st.subheader("Preview")
@@ -441,7 +426,7 @@ m4.metric("Supply upper bound", stats["supply"])
 m5.metric("Hymn rows", stats["hymn_rows"])
 m6.metric("RotationScore=0 rows", stats["rotation_zero"])
 
-st.caption(f"Hard-coded hymn rules: Style='{HYMN_STYLE_NAME}', max {MAX_HYMNS_PER_WEEK} hymn per week.")
+st.caption(f"Hard-coded hymn cap: Style='{HYMN_STYLE_NAME}', max {MAX_HYMNS_PER_WEEK} hymn per week.")
 
 if cfg.must_include_styles:
     st.info(f"Must include each week: {sorted(cfg.must_include_styles)}")
