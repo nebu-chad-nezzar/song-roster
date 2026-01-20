@@ -25,7 +25,7 @@ class Config:
     min_repeat_gap: int
 
     style_targets: dict
-    feel_targets: dict
+    type_targets: dict  # renamed from feel_targets
 
     seed: int
     rotation_alpha: float  # controls how strongly RotationScore biases selection
@@ -34,7 +34,7 @@ class Config:
     must_exclude_styles: set  # styles that must NOT appear (0 per week)
 
 
-REQUIRED_COLS = ["Title", "Artist", "Style", "Feel", "RotationScore"]
+REQUIRED_COLS = ["Title", "Artist", "Style", "Type", "RotationScore"]
 
 
 # -----------------------------
@@ -75,7 +75,7 @@ def build_song_key(df: pd.DataFrame) -> pd.Series:
 
 def weighted_pick_one(rng, eligible: pd.DataFrame, cfg: Config) -> str | None:
     """
-    Weight = style_weight * feel_weight * rotation_weight
+    Weight = style_weight * type_weight * rotation_weight
     rotation_weight = RotationScore ** alpha
 
     RotationScore is allowed to be 0..5:
@@ -88,15 +88,15 @@ def weighted_pick_one(rng, eligible: pd.DataFrame, cfg: Config) -> str | None:
     eligible["style_w"] = eligible["Style"].map(lambda s: cfg.style_targets.get(s, 0.0))
     eligible.loc[eligible["style_w"] <= 0, "style_w"] = 0.05
 
-    # Feel weight
-    eligible["feel_w"] = eligible["Feel"].map(lambda f: cfg.feel_targets.get(f, 0.0))
-    eligible.loc[eligible["feel_w"] <= 0, "feel_w"] = 0.05
+    # Type weight (renamed from Feel)
+    eligible["type_w"] = eligible["Type"].map(lambda t: cfg.type_targets.get(t, 0.0))
+    eligible.loc[eligible["type_w"] <= 0, "type_w"] = 0.05
 
     # Rotation weight (0..5)
     rot = pd.to_numeric(eligible["RotationScore"], errors="coerce").fillna(0.0).clip(lower=0.0)
     eligible["rot_w"] = rot.astype(float) ** float(cfg.rotation_alpha)
 
-    eligible["w"] = eligible["style_w"] * eligible["feel_w"] * eligible["rot_w"]
+    eligible["w"] = eligible["style_w"] * eligible["type_w"] * eligible["rot_w"]
 
     weights = eligible["w"].to_numpy(dtype=float)
     if weights.sum() <= 0:
@@ -115,7 +115,6 @@ def feasibility_checks(df: pd.DataFrame, cfg: Config):
     - must-include count <= songs per week
     - must-include and must-exclude conflict
     - info about RotationScore=0 disabled songs
-    - info about hymn rows (cap is enforced later)
     """
     unique_song_keys = df["SongKey"].nunique()
     demand = cfg.total_weeks * cfg.songs_per_week
@@ -163,9 +162,6 @@ def feasibility_checks(df: pd.DataFrame, cfg: Config):
         messages.append(f"Info: {rot0} songs have RotationScore=0 (they will never be selected).")
 
     hymn_rows = int((df["Style"].map(is_hymn)).sum())
-    if is_style(HYMN_STYLE_NAME, HYMN_STYLE_NAME) and hymn_rows == 0:
-        messages.append(f"Info: No rows found with Style='{HYMN_STYLE_NAME}' (hymn cap still applies, but won't matter).")
-
     stats = {
         "unique_songs": int(unique_song_keys),
         "demand": int(demand),
@@ -197,11 +193,10 @@ def generate_roster(df: pd.DataFrame, cfg: Config) -> list[list[str]]:
     df["Title"] = df["Title"].astype(str).str.strip()
     df["Artist"] = df["Artist"].astype(str).str.strip()
     df["Style"] = df["Style"].astype(str).str.strip()
-    df["Feel"] = df["Feel"].astype(str).str.strip()
+    df["Type"] = df["Type"].astype(str).str.strip()
     df["RotationScore"] = pd.to_numeric(df["RotationScore"], errors="coerce").fillna(0).clip(lower=0)
     df["SongKey"] = build_song_key(df)
 
-    # Cooldown tracked per SongKey
     cooldown_until = {k: 0 for k in df["SongKey"].tolist()}
     roster: list[list[str]] = []
 
@@ -247,18 +242,15 @@ def generate_roster(df: pd.DataFrame, cfg: Config) -> list[list[str]]:
 
         # 1) Must-include styles first (one per required style)
         required_styles = list(cfg.must_include_styles)
-        # Do hymn first so the cap is enforced early if Hymn is must-include
         required_styles.sort(key=lambda s: 0 if is_style(s, HYMN_STYLE_NAME) else 1)
 
         for style_name in required_styles:
             if len(week_keys) >= cfg.songs_per_week:
                 break
 
-            # Must-exclude wins (also handled in feasibility check, but keep defensive)
             if any(is_style(style_name, x) for x in cfg.must_exclude_styles):
                 continue
 
-            # If hymn cap reached, can't satisfy a Hymn must-include this week
             if is_style(style_name, HYMN_STYLE_NAME) and hymns_this_week >= MAX_HYMNS_PER_WEEK:
                 continue
 
@@ -313,7 +305,7 @@ st.title("Weekly Song Roster Generator")
 
 uploaded = st.file_uploader("Upload master song list (CSV)", type=["csv"])
 if uploaded is None:
-    st.info("Upload a CSV with columns: Title, Artist, Style, Feel, RotationScore")
+    st.info("Upload a CSV with columns: Title, Artist, Style, Type, RotationScore")
     st.stop()
 
 df = pd.read_csv(uploaded)
@@ -327,7 +319,7 @@ df = df.copy()
 df["Title"] = df["Title"].astype(str).str.strip()
 df["Artist"] = df["Artist"].astype(str).str.strip()
 df["Style"] = df["Style"].astype(str).str.strip()
-df["Feel"] = df["Feel"].astype(str).str.strip()
+df["Type"] = df["Type"].astype(str).str.strip()
 df["RotationScore"] = pd.to_numeric(df["RotationScore"], errors="coerce").fillna(0).clip(lower=0)
 df["SongKey"] = build_song_key(df)
 
@@ -335,7 +327,7 @@ df["SongKey"] = build_song_key(df)
 df = df[df["SongKey"].astype(str).str.strip() != ""].copy()
 
 st.subheader("Preview")
-st.dataframe(df[["Title", "Artist", "Style", "Feel", "RotationScore"]].head(25), use_container_width=True)
+st.dataframe(df[["Title", "Artist", "Style", "Type", "RotationScore"]].head(25), use_container_width=True)
 
 st.subheader("Configuration")
 col1, col2, col3, col4, col5 = st.columns(5)
@@ -369,24 +361,24 @@ style_targets = normalise_targets(dict(zip(style_targets_df["Style"], style_targ
 if not style_targets:
     st.warning("No positive Style targets set. Styles will be treated near-uniformly (small baseline weight).")
 
-# Feel targets
-feels = sorted(df["Feel"].unique().tolist())
-st.markdown("**Target selection probability for each Feel** (values will be normalised to sum to 1)")
-default_feel_targets = pd.DataFrame({"Feel": feels, "Target": [0.0] * len(feels)})
-if len(feels) == 1:
-    default_feel_targets["Target"] = [1.0]
+# Type targets (renamed from Feel)
+types = sorted(df["Type"].unique().tolist())
+st.markdown("**Target selection probability for each Type** (values will be normalised to sum to 1)")
+default_type_targets = pd.DataFrame({"Type": types, "Target": [0.0] * len(types)})
+if len(types) == 1:
+    default_type_targets["Target"] = [1.0]
 
-feel_targets_df = st.data_editor(
-    default_feel_targets,
+type_targets_df = st.data_editor(
+    default_type_targets,
     use_container_width=True,
     num_rows="fixed",
     column_config={
         "Target": st.column_config.NumberColumn(min_value=0.0, max_value=1.0, step=0.05, format="%.2f")
     },
 )
-feel_targets = normalise_targets(dict(zip(feel_targets_df["Feel"], feel_targets_df["Target"])))
-if not feel_targets:
-    st.warning("No positive Feel targets set. Feels will be treated near-uniformly (small baseline weight).")
+type_targets = normalise_targets(dict(zip(type_targets_df["Type"], type_targets_df["Target"])))
+if not type_targets:
+    st.warning("No positive Type targets set. Types will be treated near-uniformly (small baseline weight).")
 
 # Must include / exclude per style
 st.subheader("Per-style rules")
@@ -407,7 +399,7 @@ cfg = Config(
     songs_per_week=int(songs_per_week),
     min_repeat_gap=int(min_repeat_gap),
     style_targets=style_targets,
-    feel_targets=feel_targets,
+    type_targets=type_targets,
     seed=int(seed),
     rotation_alpha=float(rotation_alpha),
     must_include_styles=must_include_styles,
@@ -471,8 +463,8 @@ if st.button("Generate roster", type="primary", disabled=disable_generate):
         achieved_style.columns = ["Style", "Achieved proportion"]
         st.dataframe(achieved_style, use_container_width=True)
 
-        songkey_to_feel = dict(zip(df["SongKey"], df["Feel"]))
-        feel_counts = pd.Series([songkey_to_feel.get(k, "Unknown") for k in flat]).value_counts()
-        achieved_feel = (feel_counts / feel_counts.sum()).reset_index()
-        achieved_feel.columns = ["Feel", "Achieved proportion"]
-        st.dataframe(achieved_feel, use_container_width=True)
+        songkey_to_type = dict(zip(df["SongKey"], df["Type"]))
+        type_counts = pd.Series([songkey_to_type.get(k, "Unknown") for k in flat]).value_counts()
+        achieved_type = (type_counts / type_counts.sum()).reset_index()
+        achieved_type.columns = ["Type", "Achieved proportion"]
+        st.dataframe(achieved_type, use_container_width=True)
