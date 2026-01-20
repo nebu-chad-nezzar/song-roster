@@ -53,8 +53,8 @@ def is_style(value: str, style_name: str) -> bool:
     return str(value).strip().lower() == str(style_name).strip().lower()
 
 
-def is_hymn(style_value: str) -> bool:
-    return is_style(style_value, HYMN_STYLE_NAME)
+def is_hymn(type_value: str) -> bool:
+    return is_value(type_value, HYMN_STYLE_NAME)
 
 
 def max_uses_per_song(total_weeks: int, min_repeat_gap: int) -> int:
@@ -226,7 +226,7 @@ def generate_roster(df: pd.DataFrame, cfg: Config) -> list[list[str]]:
 
         def eligible_with_hymn_cap(local_df: pd.DataFrame, mask: pd.Series) -> pd.Series:
             if hymns_this_week >= MAX_HYMNS_PER_WEEK:
-                mask = mask & (~local_df["Style"].map(is_hymn))
+                mask = mask & (~local_df["Type"].map(is_hymn))
             return mask
 
         def pick_and_commit(song_key: str):
@@ -234,7 +234,7 @@ def generate_roster(df: pd.DataFrame, cfg: Config) -> list[list[str]]:
             week_keys.append(song_key)
             used_this_week.add(song_key)
 
-            style_val = df.loc[df["SongKey"] == song_key, "Style"].iloc[0]
+            style_val = df.loc[df["SongKey"] == song_key, "Type"].iloc[0]
             if is_hymn(style_val):
                 hymns_this_week += 1
 
